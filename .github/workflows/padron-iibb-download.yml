@@ -6,16 +6,16 @@
 # pueda descargarlo sin problemas de IP baneada.
 #
 # Ejecución:
-#   - Automática: 1ro de cada mes a las 6:00 UTC (3:00 AM Argentina)
+#   - Automática: 1ro de cada mes a las 5:30 UTC (2:30 AM Argentina)
 #   - Manual: desde la pestaña Actions con año/mes opcionales
 # ============================================================
 
 name: Descarga Padrón IIBB Jujuy
 
 on:
-  # Cron: 1ro de cada mes a las 6:00 UTC (3:00 AM hora Argentina)
+  # Cron: 1ro de cada mes a las 5:30 UTC (2:30 AM hora Argentina)
   schedule:
-    - cron: '0 6 1 * *'
+    - cron: '30 5 1 * *'
 
   # Permitir ejecución manual
   workflow_dispatch:
@@ -141,6 +141,34 @@ jobs:
 
           ls -la "$FILENAME"
 
+      - name: Crear metadata.json
+        if: steps.check_release.outputs.exists == 'false' && steps.download.outputs.success == 'true'
+        id: metadata
+        run: |
+          # Fecha/hora en UTC y Argentina
+          DOWNLOAD_UTC=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+          DOWNLOAD_AR=$(TZ='America/Argentina/Buenos_Aires' date '+%Y-%m-%d %H:%M:%S')
+
+          # Crear metadata.json
+          cat > metadata.json << EOF
+          {
+            "periodo": "${{ steps.periodo.outputs.year }}-${{ steps.periodo.outputs.month }}",
+            "archivo": "${{ steps.periodo.outputs.filename }}",
+            "tamano_bytes": ${{ steps.download.outputs.filesize }},
+            "descarga_utc": "${DOWNLOAD_UTC}",
+            "descarga_argentina": "${DOWNLOAD_AR}",
+            "fuente": "rentasjujuyonline.gob.ar",
+            "workflow_run": "${{ github.run_id }}",
+            "commit": "${{ github.sha }}"
+          }
+          EOF
+
+          echo "📄 metadata.json creado:"
+          cat metadata.json
+
+          echo "download_utc=$DOWNLOAD_UTC" >> $GITHUB_OUTPUT
+          echo "download_ar=$DOWNLOAD_AR" >> $GITHUB_OUTPUT
+
       - name: Crear Release
         if: steps.check_release.outputs.exists == 'false' && steps.download.outputs.success == 'true'
         uses: softprops/action-gh-release@v2
@@ -153,17 +181,27 @@ jobs:
             **Periodo:** ${{ steps.periodo.outputs.year }}-${{ steps.periodo.outputs.month }}
             **Archivo:** `${{ steps.periodo.outputs.filename }}`
             **Tamaño:** ${{ steps.download.outputs.filesize }} bytes
-            **Fecha descarga:** ${{ github.event.repository.updated_at }}
+            **Descargado:** ${{ steps.metadata.outputs.download_ar }} (Argentina)
 
-            ### Uso
+            ### Archivos incluidos
+            - `${{ steps.periodo.outputs.filename }}` - Padrón RAR original
+            - `metadata.json` - Metadata con fecha exacta de descarga
+
+            ### URL de descarga directa
             ```
-            # URL directa para descargar:
             https://github.com/${{ github.repository }}/releases/download/${{ steps.periodo.outputs.tag }}/${{ steps.periodo.outputs.filename }}
             ```
 
+            ### Metadata
+            ```
+            https://github.com/${{ github.repository }}/releases/download/${{ steps.periodo.outputs.tag }}/metadata.json
+            ```
+
             ---
-            *Descargado automáticamente desde Rentas Jujuy*
-          files: ${{ steps.periodo.outputs.filename }}
+            *Descargado automáticamente desde Rentas Jujuy via GitHub Actions*
+          files: |
+            ${{ steps.periodo.outputs.filename }}
+            metadata.json
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -181,4 +219,5 @@ jobs:
           if [ "${{ steps.download.outputs.success }}" == "true" ]; then
             echo "| Descarga | ✅ Exitosa |" >> $GITHUB_STEP_SUMMARY
             echo "| Tamaño | ${{ steps.download.outputs.filesize }} bytes |" >> $GITHUB_STEP_SUMMARY
+            echo "| Fecha (Argentina) | ${{ steps.metadata.outputs.download_ar }} |" >> $GITHUB_STEP_SUMMARY
           fi
