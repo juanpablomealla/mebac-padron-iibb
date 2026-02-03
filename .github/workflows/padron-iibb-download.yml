@@ -1,0 +1,184 @@
+# ============================================================
+# GitHub Actions Workflow: Descarga Padrón IIBB Jujuy
+# ============================================================
+# Este workflow descarga el padrón de percepciones IIBB de Jujuy
+# y lo publica como Release para que el servidor WordPress
+# pueda descargarlo sin problemas de IP baneada.
+#
+# Ejecución:
+#   - Automática: 1ro de cada mes a las 6:00 UTC (3:00 AM Argentina)
+#   - Manual: desde la pestaña Actions con año/mes opcionales
+# ============================================================
+
+name: Descarga Padrón IIBB Jujuy
+
+on:
+  # Cron: 1ro de cada mes a las 6:00 UTC (3:00 AM hora Argentina)
+  schedule:
+    - cron: '0 6 1 * *'
+
+  # Permitir ejecución manual
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Año (YYYY) - dejar vacío para mes actual'
+        required: false
+        type: string
+      month:
+        description: 'Mes (01-12) - dejar vacío para mes actual'
+        required: false
+        type: string
+
+jobs:
+  download-padron:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Necesario para crear releases
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Calcular periodo
+        id: periodo
+        run: |
+          # Si se especificó año/mes manualmente, usarlos
+          if [ -n "${{ github.event.inputs.year }}" ] && [ -n "${{ github.event.inputs.month }}" ]; then
+            YEAR="${{ github.event.inputs.year }}"
+            MONTH="${{ github.event.inputs.month }}"
+          else
+            # Usar fecha actual
+            YEAR=$(date +%Y)
+            MONTH=$(date +%m)
+          fi
+
+          # Asegurar que el mes tenga 2 dígitos
+          MONTH=$(printf "%02d" $((10#$MONTH)))
+
+          FILENAME="PADRONRETPER${YEAR}${MONTH}.rar"
+          TAG="padron-${YEAR}-${MONTH}"
+
+          echo "year=$YEAR" >> $GITHUB_OUTPUT
+          echo "month=$MONTH" >> $GITHUB_OUTPUT
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          echo "📅 Periodo: $YEAR-$MONTH"
+          echo "📦 Archivo: $FILENAME"
+          echo "🏷️  Tag: $TAG"
+
+      - name: Verificar si ya existe el release
+        id: check_release
+        run: |
+          TAG="${{ steps.periodo.outputs.tag }}"
+
+          # Verificar si el tag ya existe
+          if gh release view "$TAG" &>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️ El release $TAG ya existe"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "✅ El release $TAG no existe, se creará"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Descargar RAR de Rentas Jujuy
+        if: steps.check_release.outputs.exists == 'false'
+        id: download
+        run: |
+          FILENAME="${{ steps.periodo.outputs.filename }}"
+          URL="https://www.rentasjujuyonline.gob.ar/cedulavirtual/SalidaPadronAgentes/${FILENAME}"
+
+          echo "🌐 Descargando desde: $URL"
+
+          # Descargar con curl, seguir redirects, mostrar progreso
+          HTTP_CODE=$(curl -L -w "%{http_code}" -o "$FILENAME" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -H "Accept: application/octet-stream,*/*" \
+            -H "Accept-Language: es-AR,es;q=0.9" \
+            --connect-timeout 30 \
+            --max-time 300 \
+            "$URL")
+
+          echo "📥 HTTP Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Error: HTTP $HTTP_CODE"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Verificar que el archivo existe y tiene tamaño razonable
+          if [ ! -f "$FILENAME" ]; then
+            echo "❌ Error: Archivo no creado"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          FILE_SIZE=$(stat -c%s "$FILENAME")
+          echo "📊 Tamaño: $FILE_SIZE bytes"
+
+          # El archivo debe ser > 100KB para ser válido
+          if [ "$FILE_SIZE" -lt 100000 ]; then
+            echo "❌ Error: Archivo muy pequeño ($FILE_SIZE bytes), probablemente inválido"
+            cat "$FILENAME"  # Mostrar contenido para debug
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Verificar que es un RAR válido (magic bytes: Rar!)
+          MAGIC=$(head -c 4 "$FILENAME" | od -A n -t x1 | tr -d ' ')
+          if [ "$MAGIC" != "52617221" ]; then
+            echo "❌ Error: No es un archivo RAR válido (magic: $MAGIC)"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "✅ Archivo RAR válido descargado"
+          echo "success=true" >> $GITHUB_OUTPUT
+          echo "filesize=$FILE_SIZE" >> $GITHUB_OUTPUT
+
+          ls -la "$FILENAME"
+
+      - name: Crear Release
+        if: steps.check_release.outputs.exists == 'false' && steps.download.outputs.success == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.periodo.outputs.tag }}
+          name: "Padrón IIBB Jujuy ${{ steps.periodo.outputs.year }}-${{ steps.periodo.outputs.month }}"
+          body: |
+            ## Padrón de Percepciones IIBB - Jujuy
+
+            **Periodo:** ${{ steps.periodo.outputs.year }}-${{ steps.periodo.outputs.month }}
+            **Archivo:** `${{ steps.periodo.outputs.filename }}`
+            **Tamaño:** ${{ steps.download.outputs.filesize }} bytes
+            **Fecha descarga:** ${{ github.event.repository.updated_at }}
+
+            ### Uso
+            ```
+            # URL directa para descargar:
+            https://github.com/${{ github.repository }}/releases/download/${{ steps.periodo.outputs.tag }}/${{ steps.periodo.outputs.filename }}
+            ```
+
+            ---
+            *Descargado automáticamente desde Rentas Jujuy*
+          files: ${{ steps.periodo.outputs.filename }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resumen
+        run: |
+          echo "## 📋 Resumen" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Periodo | ${{ steps.periodo.outputs.year }}-${{ steps.periodo.outputs.month }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Archivo | ${{ steps.periodo.outputs.filename }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | ${{ steps.periodo.outputs.tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release existía | ${{ steps.check_release.outputs.exists }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.download.outputs.success }}" == "true" ]; then
+            echo "| Descarga | ✅ Exitosa |" >> $GITHUB_STEP_SUMMARY
+            echo "| Tamaño | ${{ steps.download.outputs.filesize }} bytes |" >> $GITHUB_STEP_SUMMARY
+          fi
