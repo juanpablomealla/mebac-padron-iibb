@@ -6,16 +6,23 @@
 # pueda descargarlo sin problemas de IP baneada.
 #
 # Ejecución:
-#   - Automática: 1ro de cada mes a las 5:30 UTC (2:30 AM Argentina)
+#   - Automática: días 1 al 5 de cada mes a las 5:30 UTC (2:30 AM Argentina)
 #   - Manual: desde la pestaña Actions con año/mes opcionales
+#
+# Por qué días 1-5 y no solo el día 1:
+#   Rentas no siempre publica el padrón el día 1. En 2026-08 lo publicó más
+#   tarde, el único intento del día 1 recibió HTTP 404 y el release nunca se
+#   creó (run #8 falló). Corriendo varios días se cubre ese caso; el step
+#   "Verificar si ya existe el release" corta la ejecución los días posteriores
+#   al que tuvo éxito, así que no se duplica nada.
 # ============================================================
 
 name: Descarga Padrón IIBB Jujuy
 
 on:
-  # Cron: 1ro de cada mes a las 5:30 UTC (2:30 AM hora Argentina)
+  # Cron: días 1 al 5 de cada mes a las 5:30 UTC (2:30 AM hora Argentina)
   schedule:
-    - cron: '30 5 1 * *'
+    - cron: '30 5 1-5 * *'
 
   # Permitir ejecución manual
   workflow_dispatch:
@@ -90,21 +97,48 @@ jobs:
           FILENAME="${{ steps.periodo.outputs.filename }}"
           URL="https://www.rentasjujuyonline.gob.ar/cedulavirtual/SalidaPadronAgentes/${FILENAME}"
 
+          DIA_DEL_MES=$(date +%-d)
+
           echo "🌐 Descargando desde: $URL"
+          echo "📆 Día del mes: $DIA_DEL_MES"
 
-          # Descargar con curl, seguir redirects, mostrar progreso
-          HTTP_CODE=$(curl -L -w "%{http_code}" -o "$FILENAME" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            -H "Accept: application/octet-stream,*/*" \
-            -H "Accept-Language: es-AR,es;q=0.9" \
-            --connect-timeout 30 \
-            --max-time 300 \
-            "$URL")
+          # 3 intentos con espera, para absorber errores transitorios de red
+          HTTP_CODE=000
+          for i in 1 2 3; do
+            HTTP_CODE=$(curl -L -w "%{http_code}" -o "$FILENAME" \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              -H "Accept: application/octet-stream,*/*" \
+              -H "Accept-Language: es-AR,es;q=0.9" \
+              --connect-timeout 30 \
+              --max-time 300 \
+              "$URL") || true
+            echo "  intento $i → HTTP $HTTP_CODE"
+            [ "$HTTP_CODE" = "200" ] && break
+            [ $i -lt 3 ] && sleep 15
+          done
 
-          echo "📥 HTTP Code: $HTTP_CODE"
+          echo "📥 HTTP Code final: $HTTP_CODE"
+
+          # HTTP 404 = Rentas todavía no publicó el padrón de este período.
+          # Los primeros días del mes es esperable, así que salimos sin marcar el
+          # run como fallido (el cron reintenta al día siguiente). Recién el día 5
+          # lo tratamos como alerta real, para recibir UN mail y no cinco.
+          if [ "$HTTP_CODE" = "404" ]; then
+            rm -f "$FILENAME"
+            echo "success=false" >> $GITHUB_OUTPUT
+            if [ "$DIA_DEL_MES" -ge 5 ]; then
+              echo "❌ Día $DIA_DEL_MES y el padrón sigue sin publicarse (HTTP 404)."
+              echo "::error::El padrón $FILENAME no fue publicado por Rentas al día $DIA_DEL_MES del mes."
+              exit 1
+            fi
+            echo "⏳ El padrón aún no fue publicado (HTTP 404). Se reintenta mañana."
+            echo "::notice::Padrón no publicado todavía (día $DIA_DEL_MES). Reintento automático mañana."
+            exit 0
+          fi
 
           if [ "$HTTP_CODE" != "200" ]; then
             echo "❌ Error: HTTP $HTTP_CODE"
+            echo "::error::Descarga falló con HTTP $HTTP_CODE"
             echo "success=false" >> $GITHUB_OUTPUT
             exit 1
           fi
@@ -122,7 +156,7 @@ jobs:
           # El archivo debe ser > 100KB para ser válido
           if [ "$FILE_SIZE" -lt 100000 ]; then
             echo "❌ Error: Archivo muy pequeño ($FILE_SIZE bytes), probablemente inválido"
-            cat "$FILENAME"  # Mostrar contenido para debug
+            head -c 500 "$FILENAME"  # Primeros bytes para debug (evita volcar binario entero)
             echo "success=false" >> $GITHUB_OUTPUT
             exit 1
           fi
